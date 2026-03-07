@@ -4,7 +4,7 @@ from curl_cffi import requests
 import pandas as pd
 import json
 from io import StringIO
-from bs4 import BeautifulSoup  # NOVA FERRAMENTA IMPORTADA AQUI
+from bs4 import BeautifulSoup
 
 app = FastAPI(title="API Outlier MVP")
 
@@ -25,47 +25,43 @@ def gerar_diagnostico(url: str):
         if response.status_code != 200:
             raise HTTPException(status_code=400, detail="Erro ao acessar o site.")
             
-        # 1. PEGAR AS TABELAS (O que já funcionava)
+        # 1. PEGAR TODAS AS TABELAS
         tabelas = pd.read_html(StringIO(response.text))
-        df_improvement = tabelas[0] 
-        df_splits = tabelas[1]      
         
-        # 2. PEGAR O TEXTO DO DIAGNÓSTICO DA IA (A Mágica Nova)
+        # Agora estamos pegando as TRÊS tabelas com segurança
+        df_improvement = tabelas[0] if len(tabelas) > 0 else pd.DataFrame()
+        df_station_splits = tabelas[1] if len(tabelas) > 1 else pd.DataFrame()
+        df_running_splits = tabelas[2] if len(tabelas) > 2 else pd.DataFrame() # A TABELA QUE FALTAVA!
+        
+        # 2. PEGAR O TEXTO DO DIAGNÓSTICO
         soup = BeautifulSoup(response.text, 'html.parser')
-        
         diagnostico_partes = []
         capturando = False
         
-        # O BeautifulSoup vai ler todos os textos da página de cima a baixo
         for t in soup.stripped_strings:
-            # Começa a "gravar" quando achar o título do RoxCoach
             if 'A word from RoxCoach' in t or 'Overall Performance:' in t:
                 capturando = True
-                
-            # Para de "gravar" quando chegar na parte de atletas similares (final da página)
             if 'Similar Athletes' in t or 'Other Results' in t or 'Pace Calculator' in t:
                 capturando = False
-                
             if capturando:
                 texto = t.strip()
-                # Salva os parágrafos e títulos ignorando lixos curtos
                 if len(texto) > 10: 
                     diagnostico_partes.append(texto)
                     
-        # Junta todos os parágrafos capturados com uma quebra de linha dupla
         texto_ia_final = "\n\n".join(diagnostico_partes)
-        
         if not texto_ia_final:
             texto_ia_final = "Diagnóstico não encontrado para este atleta."
 
-        # 3. EMPACOTAR E DEVOLVER TUDO
+        # 3. EMPACOTAR TUDO (Adicionamos a nova chave 'running_splits')
         dados_atleta = {
-            'diagnostico_melhoria': json.loads(df_improvement.to_json(orient='records')),
-            'tempos_splits': json.loads(df_splits.to_json(orient='records')),
-            'texto_ia': texto_ia_final  # NOVA CHAVE ADICIONADA AO JSON
+            'diagnostico_melhoria': json.loads(df_improvement.to_json(orient='records')) if not df_improvement.empty else [],
+            'tempos_splits': json.loads(df_station_splits.to_json(orient='records')) if not df_station_splits.empty else [],
+            'running_splits': json.loads(df_running_splits.to_json(orient='records')) if not df_running_splits.empty else [],
+            'texto_ia': texto_ia_final
         }
         
         return dados_atleta
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Falha ao extrair: {str(e)}")
+
