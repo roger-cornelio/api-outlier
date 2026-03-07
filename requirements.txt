@@ -3,3 +3,4 @@ uvicorn
 curl_cffi
 pandas
 lxml
+beautifulsoup4
