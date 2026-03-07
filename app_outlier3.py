@@ -29,13 +29,12 @@ def gerar_diagnostico(url: str):
         tabelas = pd.read_html(StringIO(response.text))
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # --- EXTRAÇÃO DE NOME, TEMPORADA E EVENTO (NOVO) ---
+        # --- EXTRAÇÃO DE NOME, TEMPORADA E EVENTO ---
         nome_atleta = "N/A"
         evento = "N/A"
         divisao = "N/A"
         temporada = "N/A"
         
-        # O titulo da pagina é sempre: "Roger Cornélio Hyrox result for 2025 Rio de Janeiro - Hyrox Pro Men S8"
         title_text = soup.title.string if soup.title else ""
         if " Hyrox result for " in title_text:
             partes = title_text.split(" Hyrox result for ")
@@ -82,7 +81,7 @@ def gerar_diagnostico(url: str):
                     "percentage": percentage
                 })
                 
-        # 2. TEMPOS E SPLITS (Capturando o Finish Time)
+        # 2. TEMPOS E SPLITS
         df_splits = tabelas[1] if len(tabelas) > 1 else pd.DataFrame()
         lista_splits = []
         finish_time = "N/A"
@@ -97,10 +96,13 @@ def gerar_diagnostico(url: str):
                     "time": str(row[1])
                 })
                 if nome_estacao.lower() == "roxzone":
-                    # Coluna 2 é o tempo acumulado exato final
-                    finish_time = str(row[2])
+                    # CORREÇÃO DO BUG 'INDEX 2 IS OUT OF BOUNDS' QUE O LOVABLE ACHOU
+                    if len(row) > 2:
+                        finish_time = str(row[2])
+                    else:
+                        finish_time = str(row[1])
 
-        # 3. RESUMO DE PERFORMANCE (Capturando métricas ocultas)
+        # 3. RESUMO DE PERFORMANCE
         texto_completo = soup.get_text(separator=" ", strip=True)
         
         resumo = {
@@ -119,7 +121,6 @@ def gerar_diagnostico(url: str):
             "roxzone": "N/A"
         }
         
-        # Regex caçador para achar os ranks (Ex: "01:19:57 21st in AG | Top 40.4% 78th | Top 41.5%")
         match_ranks = re.search(r'(\d{2}:\d{2}:\d{2})\s+(\d+(?:st|nd|rd|th)\s+in\s+AG\s+\|\s+Top\s+[\d.]+%)\s+(\d+(?:st|nd|rd|th)\s+\|\s+Top\s+[\d.]+%)', texto_completo)
         if match_ranks:
             if resumo["finish_time"] == "N/A":
@@ -173,4 +174,5 @@ def gerar_diagnostico(url: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Falha ao extrair: {str(e)}")
 # Forçando o Render a atualizar
+
 
