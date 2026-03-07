@@ -134,3 +134,4 @@ def gerar_diagnostico(url: str):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Falha ao extrair: {str(e)}")
+# Forçando o Render a atualizar
