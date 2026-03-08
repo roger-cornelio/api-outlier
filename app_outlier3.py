@@ -214,5 +214,16 @@ def gerar_diagnostico(request: Request):
             texto_ia_final = "Diagnóstico não encontrado."
 
         # EMPACOTANDO TUDO
-        dados_atleta = {*
-           # Forçando o Render a atualizar
+        dados_atleta = {
+            'resumo_performance': resumo,
+            'diagnostico_melhoria': lista_improvement,
+            'tempos_splits': lista_splits,
+            'texto_ia': texto_ia_final
+        }
+        
+        return dados_atleta
+
+    except Exception as e:
+        print(f"Erro na API: {str(e)}") # O erro vai aparecer no Logs do Render para facilitar debugar
+        raise HTTPException(status_code=500, detail=f"Falha ao extrair: {str(e)}")
+               # Forçando o Render a atualizar
