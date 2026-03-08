@@ -1,13 +1,12 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from curl_cffi import requests
+from curl_cffi import requests  # Mantido seu bypass anti-robô!
 import pandas as pd
-import json
 from io import StringIO
 from bs4 import BeautifulSoup
 import re
 
-app = FastAPI(title="API Outlier MVP")
+app = FastAPI(title="API Outlier MVP - Hunter Mode")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,41 +16,85 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def slugify(text: str) -> str:
+    return text.lower().replace(' ', '-')
+
 @app.get("/diagnostico")
-def gerar_diagnostico(url: str):
-    print(f"Buscando dados de: {url}")
+def gerar_diagnostico(hyrox_url: str, athlete_name: str, event_name: str, division: str):
+    print(f"Iniciando busca para: {athlete_name} | Evento: {event_name}")
     try:
-        response = requests.get(url, impersonate="chrome")
+        # ==========================================
+        # PARTE 1: MODO CAÇADOR (Encontrar a URL exata)
+        # ==========================================
+        
+        # 1. Extrair Season e Sexo da URL original da Hyrox
+        season_match = re.search(r'season-(\d+)', hyrox_url)
+        season = season_match.group(1) if season_match else "8"
+        
+        sex_match = re.search(r'sex(?:%5D|\])=([MW])', hyrox_url)
+        sex_char = sex_match.group(1) if sex_match else "M"
+        sex_str = "men" if sex_char == "M" else "women"
+        
+        # 2. Acessar a página do Evento no RoxCoach
+        event_slug = slugify(event_name)
+        race_url = f"https://www.rox-coach.com/seasons/{season}/races/{event_slug}"
+        
+        race_resp = requests.get(race_url, impersonate="chrome")
+        if race_resp.status_code != 200:
+            raise ValueError(f"Evento não encontrado no RoxCoach: {race_url}")
+            
+        soup = BeautifulSoup(race_resp.text, 'html.parser')
+        
+        # 3. Encontrar a URL da Divisão (com o hash aleatório ex: b9h)
+        div_norm = division.lower().replace('hyrox ', '').split()[0]
+        division_href = None
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if '/divisions/' in href and div_norm in href.lower():
+                division_href = href
+                break
+                
+        if not division_href:
+            raise ValueError(f"Divisão '{division}' não encontrada.")
+            
+        # 4. Acessar o Leaderboard e procurar o atleta
+        leaderboard_url = f"https://www.rox-coach.com{division_href}"
+        if "/results" not in leaderboard_url:
+            leaderboard_url += "/results"
+        leaderboard_url += f"?sex={sex_str}"
+        
+        lead_resp = requests.get(leaderboard_url, impersonate="chrome")
+        lead_soup = BeautifulSoup(lead_resp.text, 'html.parser')
+        
+        search_parts = set(athlete_name.lower().split())
+        athlete_href = None
+        
+        for a in lead_soup.find_all('a', href=True):
+            if '/results/' in a['href']:
+                name_parts = set(a.text.strip().lower().split())
+                if len(search_parts.intersection(name_parts)) >= 2:
+                    athlete_href = a['href']
+                    break
+                    
+        if not athlete_href:
+            raise ValueError(f"Atleta '{athlete_name}' não encontrado no ranking.")
+            
+        target_url = f"https://www.rox-coach.com{athlete_href}"
+        print(f"🎯 URL Alvo Encontrada: {target_url}")
+
+        # ==========================================
+        # PARTE 2: A SUA LÓGICA DE EXTRAÇÃO E PARSING
+        # ==========================================
+        
+        response = requests.get(target_url, impersonate="chrome")
         
         if response.status_code != 200:
-            raise HTTPException(status_code=400, detail="Erro ao acessar o site.")
+            raise HTTPException(status_code=400, detail="Erro ao acessar a página do atleta.")
             
         tabelas = pd.read_html(StringIO(response.text))
-        soup = BeautifulSoup(response.text, 'html.parser')
+        soup_final = BeautifulSoup(response.text, 'html.parser')
         
-        # --- EXTRAÇÃO DE NOME, TEMPORADA E EVENTO ---
-        nome_atleta = "N/A"
-        evento = "N/A"
-        divisao = "N/A"
-        temporada = "N/A"
-        
-        title_text = soup.title.string if soup.title else ""
-        if " Hyrox result for " in title_text:
-            partes = title_text.split(" Hyrox result for ")
-            nome_atleta = partes[0].strip()
-            infos_evento = partes[1].split(" - ")
-            if len(infos_evento) > 0:
-                evento = infos_evento[0].strip()
-            if len(infos_evento) > 1:
-                div_temp = infos_evento[1].strip()
-                match_temp = re.search(r'(S\d+|Season \d+)$', div_temp)
-                if match_temp:
-                    temporada = match_temp.group(1)
-                    divisao = div_temp.replace(temporada, "").strip()
-                else:
-                    divisao = div_temp
-        
-        # 1. DIAGNÓSTICO DE MELHORIA
+        # 1. DIAGNÓSTICO DE MELHORIA (Sua lógica perfeita de From X to Y)
         df_improvement = tabelas[0] if len(tabelas) > 0 else pd.DataFrame()
         lista_improvement = []
         if not df_improvement.empty:
@@ -81,7 +124,7 @@ def gerar_diagnostico(url: str):
                     "percentage": percentage
                 })
                 
-        # 2. TEMPOS E SPLITS
+        # 2. TEMPOS E SPLITS (Sua correção do Roxzone)
         df_splits = tabelas[1] if len(tabelas) > 1 else pd.DataFrame()
         lista_splits = []
         finish_time = "N/A"
@@ -96,20 +139,19 @@ def gerar_diagnostico(url: str):
                     "time": str(row[1])
                 })
                 if nome_estacao.lower() == "roxzone":
-                    # CORREÇÃO DO BUG 'INDEX 2 IS OUT OF BOUNDS' QUE O LOVABLE ACHOU
                     if len(row) > 2:
                         finish_time = str(row[2])
                     else:
                         finish_time = str(row[1])
 
-        # 3. RESUMO DE PERFORMANCE
-        texto_completo = soup.get_text(separator=" ", strip=True)
+        # 3. RESUMO DE PERFORMANCE (Sua busca por ranks e tempos totais)
+        texto_completo = soup_final.get_text(separator=" ", strip=True)
         
         resumo = {
-            "nome_atleta": nome_atleta,
-            "temporada": temporada,
-            "evento": evento,
-            "divisao": divisao,
+            "nome_atleta": athlete_name,
+            "temporada": season,
+            "evento": event_name,
+            "divisao": division,
             "finish_time": finish_time,
             "posicao_categoria": "N/A",
             "posicao_geral": "N/A",
@@ -128,7 +170,7 @@ def gerar_diagnostico(url: str):
             resumo["posicao_categoria"] = match_ranks.group(2)
             resumo["posicao_geral"] = match_ranks.group(3)
         
-        textos_limpos = [t.strip() for t in soup.stripped_strings if t.strip()]
+        textos_limpos = [t.strip() for t in soup_final.stripped_strings if t.strip()]
         for i, texto in enumerate(textos_limpos):
             if i > 0:
                 if texto == "Run Total" and resumo["run_total"] == "N/A":
@@ -144,10 +186,10 @@ def gerar_diagnostico(url: str):
                 elif texto == "Roxzone" and resumo["roxzone"] == "N/A":
                     resumo["roxzone"] = textos_limpos[i-1]
 
-        # 4. TEXTO DO TREINADOR IA
+        # 4. TEXTO DO TREINADOR IA (Sua extração cirúrgica do texto)
         diagnostico_partes = []
         capturando = False
-        for t in soup.stripped_strings:
+        for t in soup_final.stripped_strings:
             if 'A word from RoxCoach' in t or 'Overall Performance:' in t:
                 capturando = True
             if 'Similar Athletes' in t or 'Other Results' in t or 'Pace Calculator' in t:
@@ -172,6 +214,7 @@ def gerar_diagnostico(url: str):
         return dados_atleta
 
     except Exception as e:
+        print(f"Erro na API: {str(e)}") # Log no Render
         raise HTTPException(status_code=500, detail=f"Falha ao extrair: {str(e)}")
 # Forçando o Render a atualizar
 
