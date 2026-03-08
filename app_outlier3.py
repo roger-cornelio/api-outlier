@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from curl_cffi import requests  # Mantido seu bypass anti-robô!
 import pandas as pd
@@ -20,7 +20,20 @@ def slugify(text: str) -> str:
     return text.lower().replace(' ', '-')
 
 @app.get("/diagnostico")
-def gerar_diagnostico(hyrox_url: str, athlete_name: str, event_name: str, division: str):
+def gerar_diagnostico(request: Request):
+    params = request.query_params
+    
+    # ==========================================
+    # 🛡️ BLINDAGEM DE PARÂMETROS (Resolve o Erro 400 do Lovable)
+    # ==========================================
+    hyrox_url = params.get('hyrox_url') or params.get('url') or params.get('resultado_url')
+    athlete_name = params.get('athlete_name') or params.get('nome_do_atleta') or params.get('nome') or params.get('athleteName')
+    event_name = params.get('event_name') or params.get('evento') or params.get('nome_do_evento') or params.get('eventName')
+    division = params.get('division') or params.get('divisao')
+    
+    if not all([hyrox_url, athlete_name, event_name, division]):
+        raise HTTPException(status_code=400, detail=f"Faltam parâmetros! Recebidos do Lovable: {dict(params)}")
+
     print(f"Iniciando busca para: {athlete_name} | Evento: {event_name}")
     try:
         # ==========================================
@@ -94,7 +107,7 @@ def gerar_diagnostico(hyrox_url: str, athlete_name: str, event_name: str, divisi
         tabelas = pd.read_html(StringIO(response.text))
         soup_final = BeautifulSoup(response.text, 'html.parser')
         
-        # 1. DIAGNÓSTICO DE MELHORIA (Sua lógica perfeita de From X to Y)
+        # 1. DIAGNÓSTICO DE MELHORIA (Sua lógica perfeita)
         df_improvement = tabelas[0] if len(tabelas) > 0 else pd.DataFrame()
         lista_improvement = []
         if not df_improvement.empty:
@@ -144,7 +157,7 @@ def gerar_diagnostico(hyrox_url: str, athlete_name: str, event_name: str, divisi
                     else:
                         finish_time = str(row[1])
 
-        # 3. RESUMO DE PERFORMANCE (Sua busca por ranks e tempos totais)
+        # 3. RESUMO DE PERFORMANCE
         texto_completo = soup_final.get_text(separator=" ", strip=True)
         
         resumo = {
@@ -186,7 +199,7 @@ def gerar_diagnostico(hyrox_url: str, athlete_name: str, event_name: str, divisi
                 elif texto == "Roxzone" and resumo["roxzone"] == "N/A":
                     resumo["roxzone"] = textos_limpos[i-1]
 
-        # 4. TEXTO DO TREINADOR IA (Sua extração cirúrgica do texto)
+        # 4. TEXTO DO TREINADOR IA
         diagnostico_partes = []
         capturando = False
         for t in soup_final.stripped_strings:
@@ -214,8 +227,6 @@ def gerar_diagnostico(hyrox_url: str, athlete_name: str, event_name: str, divisi
         return dados_atleta
 
     except Exception as e:
-        print(f"Erro na API: {str(e)}") # Log no Render
+        print(f"Erro na API: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Falha ao extrair: {str(e)}")
-# Forçando o Render a atualizar
-
-
+        # Forçando o Render a atualizar
