@@ -2,5 +2,6 @@ fastapi
 uvicorn
 curl_cffi
 pandas
-lxml
 beautifulsoup4
+html5lib
+lxml
