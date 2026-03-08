@@ -1,12 +1,13 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from curl_cffi import requests  # Mantido seu bypass anti-robô!
+from curl_cffi import requests  # Bypass anti-robô
 import pandas as pd
 from io import StringIO
 from bs4 import BeautifulSoup
 import re
+import unicodedata
 
-app = FastAPI(title="API Outlier MVP - Hunter Mode")
+app = FastAPI(title="API Outlier MVP - Hunter Mode v3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,14 +18,18 @@ app.add_middleware(
 )
 
 def slugify(text: str) -> str:
-    return text.lower().replace(' ', '-')
+    # Remove acentos (ex: Cornélio -> cornelio) e cria o formato exato da URL
+    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
+    text = text.lower().strip()
+    text = re.sub(r'[^a-z0-9\s-]', '', text)
+    return re.sub(r'[\s-]+', '-', text)
 
 @app.get("/diagnostico")
 def gerar_diagnostico(request: Request):
     params = request.query_params
     
     # ==========================================
-    # 🛡️ BLINDAGEM DE PARÂMETROS (Resolve o Erro 400 do Lovable)
+    # 🛡️ BLINDAGEM DE PARÂMETROS (Fim do Erro 400)
     # ==========================================
     hyrox_url = params.get('hyrox_url') or params.get('url') or params.get('resultado_url')
     athlete_name = params.get('athlete_name') or params.get('nome_do_atleta') or params.get('nome') or params.get('athleteName')
@@ -32,21 +37,17 @@ def gerar_diagnostico(request: Request):
     division = params.get('division') or params.get('divisao')
     
     if not all([hyrox_url, athlete_name, event_name, division]):
-        raise HTTPException(status_code=400, detail=f"Faltam parâmetros! Recebidos do Lovable: {dict(params)}")
+        raise HTTPException(status_code=400, detail=f"Faltam parâmetros! Recebidos: {dict(params)}")
 
     print(f"Iniciando busca para: {athlete_name} | Evento: {event_name}")
     try:
         # ==========================================
-        # PARTE 1: MODO CAÇADOR (Encontrar a URL exata)
+        # PARTE 1: MODO CAÇADOR DIRETO (Bypass de Paginação)
         # ==========================================
         
         # 1. Extrair Season e Sexo da URL original da Hyrox
         season_match = re.search(r'season-(\d+)', hyrox_url)
         season = season_match.group(1) if season_match else "8"
-        
-        sex_match = re.search(r'sex(?:%5D|\])=([MW])', hyrox_url)
-        sex_char = sex_match.group(1) if sex_match else "M"
-        sex_str = "men" if sex_char == "M" else "women"
         
         # 2. Acessar a página do Evento no RoxCoach
         event_slug = slugify(event_name)
@@ -70,44 +71,40 @@ def gerar_diagnostico(request: Request):
         if not division_href:
             raise ValueError(f"Divisão '{division}' não encontrada.")
             
-        # 4. Acessar o Leaderboard e procurar o atleta
-        leaderboard_url = f"https://www.rox-coach.com{division_href}"
-        if "/results" not in leaderboard_url:
-            leaderboard_url += "/results"
-        leaderboard_url += f"?sex={sex_str}"
+        # 4. CONSTRUIR URL DIRETA DO ATLETA (Pulando o Leaderboard)
+        athlete_slug = slugify(athlete_name)
+        base_div_url = division_href.split('/results')[0] # Remove o /results do final, se houver
         
-        lead_resp = requests.get(leaderboard_url, impersonate="chrome")
-        lead_soup = BeautifulSoup(lead_resp.text, 'html.parser')
+        target_url = f"https://www.rox-coach.com{base_div_url}/results/{athlete_slug}"
+        print(f"🎯 Tentando URL Principal: {target_url}")
+
+        response = requests.get(target_url, impersonate="chrome")
         
-        search_parts = set(athlete_name.lower().split())
-        athlete_href = None
-        
-        for a in lead_soup.find_all('a', href=True):
-            if '/results/' in a['href']:
-                name_parts = set(a.text.strip().lower().split())
-                if len(search_parts.intersection(name_parts)) >= 2:
-                    athlete_href = a['href']
-                    break
+        # PLANO B: Se o RoxCoach engoliu o nome do meio (ex: Caio Gabriel Assayag virou caio-assayag)
+        if response.status_code != 200:
+            nome_partes = athlete_name.split()
+            if len(nome_partes) > 2:
+                nome_curto = f"{nome_partes[0]} {nome_partes[-1]}"
+                slug_curto = slugify(nome_curto)
+                target_url_2 = f"https://www.rox-coach.com{base_div_url}/results/{slug_curto}"
+                print(f"🎯 Tentando URL Alternativa (Nome + Sobrenome): {target_url_2}")
+                response = requests.get(target_url_2, impersonate="chrome")
+                if response.status_code == 200:
+                    target_url = target_url_2
                     
-        if not athlete_href:
-            raise ValueError(f"Atleta '{athlete_name}' não encontrado no ranking.")
-            
-        target_url = f"https://www.rox-coach.com{athlete_href}"
-        print(f"🎯 URL Alvo Encontrada: {target_url}")
+        # Se mesmo com o Plano B falhar, aborta
+        if response.status_code != 200:
+            raise ValueError(f"Página do atleta não encontrada no RoxCoach após múltiplas tentativas.")
 
         # ==========================================
         # PARTE 2: A SUA LÓGICA DE EXTRAÇÃO E PARSING
         # ==========================================
+        # Já temos o HTML da página do atleta no objeto `response`!
         
-        response = requests.get(target_url, impersonate="chrome")
-        
-        if response.status_code != 200:
-            raise HTTPException(status_code=400, detail="Erro ao acessar a página do atleta.")
-            
         tabelas = pd.read_html(StringIO(response.text))
         soup_final = BeautifulSoup(response.text, 'html.parser')
         
-        # 1. DIAGNÓSTICO DE MELHORIA (Sua lógica perfeita)
+        # 1. DIAGNÓSTICO DE MELHORIA
         df_improvement = tabelas[0] if len(tabelas) > 0 else pd.DataFrame()
         lista_improvement = []
         if not df_improvement.empty:
@@ -137,7 +134,7 @@ def gerar_diagnostico(request: Request):
                     "percentage": percentage
                 })
                 
-        # 2. TEMPOS E SPLITS (Sua correção do Roxzone)
+        # 2. TEMPOS E SPLITS (Com correção do Roxzone)
         df_splits = tabelas[1] if len(tabelas) > 1 else pd.DataFrame()
         lista_splits = []
         finish_time = "N/A"
@@ -217,16 +214,5 @@ def gerar_diagnostico(request: Request):
             texto_ia_final = "Diagnóstico não encontrado."
 
         # EMPACOTANDO TUDO
-        dados_atleta = {
-            'resumo_performance': resumo,
-            'diagnostico_melhoria': lista_improvement,
-            'tempos_splits': lista_splits,
-            'texto_ia': texto_ia_final
-        }
-        
-        return dados_atleta
-
-    except Exception as e:
-        print(f"Erro na API: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Falha ao extrair: {str(e)}")
-        # Forçando o Render a atualizar
+        dados_atleta = {*
+           # Forçando o Render a atualizar
