@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 import re
 import unicodedata
 
-app = FastAPI(title="API Outlier MVP - Hunter Mode v3")
+app = FastAPI(title="API Outlier MVP - Hunter Mode v4.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,7 +18,7 @@ app.add_middleware(
 )
 
 def slugify(text: str) -> str:
-    # Remove acentos (ex: Cornélio -> cornelio) e cria o formato exato da URL
+    # Remove acentos e caracteres especiais para formar a URL perfeita
     text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
     text = text.lower().strip()
     text = re.sub(r'[^a-z0-9\s-]', '', text)
@@ -29,7 +29,7 @@ def gerar_diagnostico(request: Request):
     params = request.query_params
     
     # ==========================================
-    # 🛡️ BLINDAGEM DE PARÂMETROS (Fim do Erro 400)
+    # 🛡️ BLINDAGEM DE PARÂMETROS
     # ==========================================
     hyrox_url = params.get('hyrox_url') or params.get('url') or params.get('resultado_url')
     athlete_name = params.get('athlete_name') or params.get('nome_do_atleta') or params.get('nome') or params.get('athleteName')
@@ -42,24 +42,38 @@ def gerar_diagnostico(request: Request):
     print(f"Iniciando busca para: {athlete_name} | Evento: {event_name}")
     try:
         # ==========================================
-        # PARTE 1: MODO CAÇADOR DIRETO (Bypass de Paginação)
+        # PARTE 1: MODO CAÇADOR (Bypass Total)
         # ==========================================
         
-        # 1. Extrair Season e Sexo da URL original da Hyrox
+        # 1. Extrair Season e Sexo
         season_match = re.search(r'season-(\d+)', hyrox_url)
         season = season_match.group(1) if season_match else "8"
         
-        # 2. Acessar a página do Evento no RoxCoach
+        sex_match = re.search(r'sex(?:%5D|\])=([MW])', hyrox_url)
+        sex_char = sex_match.group(1) if sex_match else "M"
+        sex_str = "men" if sex_char == "M" else "women"
+        
+        # 2. Acessar a página do Evento
         event_slug = slugify(event_name)
         race_url = f"https://www.rox-coach.com/seasons/{season}/races/{event_slug}"
         
         race_resp = requests.get(race_url, impersonate="chrome")
+        
+        # PLANO B PARA O EVENTO: O Lovable manda "2025 Sao Paulo", mas pode ser só "sao-paulo"
         if race_resp.status_code != 200:
-            raise ValueError(f"Evento não encontrado no RoxCoach: {race_url}")
+            event_slug_no_year = re.sub(r'^\d{4}-', '', event_slug) # Arranca o ano do começo
+            race_url_2 = f"https://www.rox-coach.com/seasons/{season}/races/{event_slug_no_year}"
+            print(f"Tentando URL de Evento alternativa: {race_url_2}")
+            race_resp = requests.get(race_url_2, impersonate="chrome")
+            if race_resp.status_code == 200:
+                race_url = race_url_2
+                
+        if race_resp.status_code != 200:
+            raise ValueError(f"Evento não encontrado no RoxCoach. Tentamos: {race_url}")
             
         soup = BeautifulSoup(race_resp.text, 'html.parser')
         
-        # 3. Encontrar a URL da Divisão (com o hash aleatório ex: b9h)
+        # 3. Encontrar a URL da Divisão
         div_norm = division.lower().replace('hyrox ', '').split()[0]
         division_href = None
         for a in soup.find_all('a', href=True):
@@ -71,36 +85,69 @@ def gerar_diagnostico(request: Request):
         if not division_href:
             raise ValueError(f"Divisão '{division}' não encontrada.")
             
-        # 4. CONSTRUIR URL DIRETA DO ATLETA (Pulando o Leaderboard)
+        # 4. BUSCA DO ATLETA (Varredura de Falsos Positivos)
         athlete_slug = slugify(athlete_name)
-        base_div_url = division_href.split('/results')[0] # Remove o /results do final, se houver
+        base_div_url = division_href.split('/results')[0]
         
         target_url = f"https://www.rox-coach.com{base_div_url}/results/{athlete_slug}"
         print(f"🎯 Tentando URL Principal: {target_url}")
 
         response = requests.get(target_url, impersonate="chrome")
         
-        # PLANO B: Se o RoxCoach engoliu o nome do meio (ex: Caio Gabriel Assayag virou caio-assayag)
-        if response.status_code != 200:
+        # TENTATIVA 2: Nome curto
+        if response.status_code != 200 or "<table" not in response.text.lower():
             nome_partes = athlete_name.split()
             if len(nome_partes) > 2:
                 nome_curto = f"{nome_partes[0]} {nome_partes[-1]}"
                 slug_curto = slugify(nome_curto)
                 target_url_2 = f"https://www.rox-coach.com{base_div_url}/results/{slug_curto}"
-                print(f"🎯 Tentando URL Alternativa (Nome + Sobrenome): {target_url_2}")
-                response = requests.get(target_url_2, impersonate="chrome")
-                if response.status_code == 200:
+                print(f"🎯 Tentando URL Curta: {target_url_2}")
+                response_2 = requests.get(target_url_2, impersonate="chrome")
+                if response_2.status_code == 200 and "<table" in response_2.text.lower():
                     target_url = target_url_2
+                    response = response_2
+
+        # TENTATIVA 3: O Verdadeiro Caçador (Varredura no Leaderboard caso as URLs diretas falhem)
+        if response.status_code != 200 or "<table" not in response.text.lower():
+            print("🕵️ URLs diretas falharam ou sem tabela. Iniciando Varredura no Leaderboard...")
+            leaderboard_url = f"https://www.rox-coach.com{division_href}"
+            if "/results" not in leaderboard_url:
+                leaderboard_url += "/results"
+            leaderboard_url += f"?sex={sex_str}"
+            
+            search_parts = set(athlete_name.lower().split())
+            athlete_href = None
+            
+            # Varre as páginas de 1 a 6
+            for page in range(1, 7):
+                page_url = f"{leaderboard_url}&page={page}"
+                print(f"Lendo página {page}...")
+                lead_resp = requests.get(page_url, impersonate="chrome")
+                lead_soup = BeautifulSoup(lead_resp.text, 'html.parser')
+                
+                for a in lead_soup.find_all('a', href=True):
+                    href = a['href']
+                    if '/results/' in href and '/divisions/' in href:
+                        name_parts = set(a.text.strip().lower().split())
+                        if len(search_parts.intersection(name_parts)) >= 2:
+                            athlete_href = href
+                            break
+                if athlete_href:
+                    print(f"✅ Link verdadeiro encontrado na página {page}!")
+                    break
                     
-        # Se mesmo com o Plano B falhar, aborta
-        if response.status_code != 200:
-            raise ValueError(f"Página do atleta não encontrada no RoxCoach após múltiplas tentativas.")
+            if not athlete_href:
+                raise ValueError(f"Atleta '{athlete_name}' não encontrado nas URLs diretas nem na varredura.")
+                
+            target_url = f"https://www.rox-coach.com{athlete_href}"
+            response = requests.get(target_url, impersonate="chrome")
+            
+        if "<table" not in response.text.lower():
+            raise ValueError(f"A página do atleta foi encontrada, mas não carregou as tabelas de tempos.")
 
         # ==========================================
         # PARTE 2: A SUA LÓGICA DE EXTRAÇÃO E PARSING
         # ==========================================
-        # Já temos o HTML da página do atleta no objeto `response`!
-        
         tabelas = pd.read_html(StringIO(response.text))
         soup_final = BeautifulSoup(response.text, 'html.parser')
         
@@ -134,7 +181,7 @@ def gerar_diagnostico(request: Request):
                     "percentage": percentage
                 })
                 
-        # 2. TEMPOS E SPLITS (Com correção do Roxzone)
+        # 2. TEMPOS E SPLITS
         df_splits = tabelas[1] if len(tabelas) > 1 else pd.DataFrame()
         lista_splits = []
         finish_time = "N/A"
@@ -224,6 +271,6 @@ def gerar_diagnostico(request: Request):
         return dados_atleta
 
     except Exception as e:
-        print(f"Erro na API: {str(e)}") # O erro vai aparecer no Logs do Render para facilitar debugar
+        print(f"Erro na API: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Falha ao extrair: {str(e)}")
-               # Forçando o Render a atualizar
+        # Forçando o Render a atualizar
