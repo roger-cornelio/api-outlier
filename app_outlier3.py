@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 import re
 import unicodedata
 
-app = FastAPI(title="API Outlier MVP - Hunter Mode v4.1")
+app = FastAPI(title="API Outlier MVP - Hunter Mode v4.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,14 +57,15 @@ def gerar_diagnostico(request: Request):
         event_slug = slugify(event_name)
         race_url = f"https://www.rox-coach.com/seasons/{season}/races/{event_slug}"
         
-        race_resp = requests.get(race_url, impersonate="chrome")
+        # 👉 AUMENTO DE TIMEOUT PARA 60 SEGUNDOS AQUI
+        race_resp = requests.get(race_url, impersonate="chrome", timeout=60)
         
-        # PLANO B PARA O EVENTO: O Lovable manda "2025 Sao Paulo", mas pode ser só "sao-paulo"
+        # PLANO B PARA O EVENTO
         if race_resp.status_code != 200:
-            event_slug_no_year = re.sub(r'^\d{4}-', '', event_slug) # Arranca o ano do começo
+            event_slug_no_year = re.sub(r'^\d{4}-', '', event_slug)
             race_url_2 = f"https://www.rox-coach.com/seasons/{season}/races/{event_slug_no_year}"
             print(f"Tentando URL de Evento alternativa: {race_url_2}")
-            race_resp = requests.get(race_url_2, impersonate="chrome")
+            race_resp = requests.get(race_url_2, impersonate="chrome", timeout=60)
             if race_resp.status_code == 200:
                 race_url = race_url_2
                 
@@ -92,7 +93,8 @@ def gerar_diagnostico(request: Request):
         target_url = f"https://www.rox-coach.com{base_div_url}/results/{athlete_slug}"
         print(f"🎯 Tentando URL Principal: {target_url}")
 
-        response = requests.get(target_url, impersonate="chrome")
+        # 👉 AUMENTO DE TIMEOUT PARA 60 SEGUNDOS AQUI
+        response = requests.get(target_url, impersonate="chrome", timeout=60)
         
         # TENTATIVA 2: Nome curto
         if response.status_code != 200 or "<table" not in response.text.lower():
@@ -102,12 +104,12 @@ def gerar_diagnostico(request: Request):
                 slug_curto = slugify(nome_curto)
                 target_url_2 = f"https://www.rox-coach.com{base_div_url}/results/{slug_curto}"
                 print(f"🎯 Tentando URL Curta: {target_url_2}")
-                response_2 = requests.get(target_url_2, impersonate="chrome")
+                response_2 = requests.get(target_url_2, impersonate="chrome", timeout=60)
                 if response_2.status_code == 200 and "<table" in response_2.text.lower():
                     target_url = target_url_2
                     response = response_2
 
-        # TENTATIVA 3: O Verdadeiro Caçador (Varredura no Leaderboard caso as URLs diretas falhem)
+        # TENTATIVA 3: O Verdadeiro Caçador (Varredura no Leaderboard com 60s)
         if response.status_code != 200 or "<table" not in response.text.lower():
             print("🕵️ URLs diretas falharam ou sem tabela. Iniciando Varredura no Leaderboard...")
             leaderboard_url = f"https://www.rox-coach.com{division_href}"
@@ -118,11 +120,12 @@ def gerar_diagnostico(request: Request):
             search_parts = set(athlete_name.lower().split())
             athlete_href = None
             
-            # Varre as páginas de 1 a 6
-            for page in range(1, 7):
+            # Varre as páginas de 1 a 5 (evita limite de tempo da própria plataforma Render)
+            for page in range(1, 6):
                 page_url = f"{leaderboard_url}&page={page}"
                 print(f"Lendo página {page}...")
-                lead_resp = requests.get(page_url, impersonate="chrome")
+                # 👉 AUMENTO DE TIMEOUT PARA 60 SEGUNDOS AQUI
+                lead_resp = requests.get(page_url, impersonate="chrome", timeout=60)
                 lead_soup = BeautifulSoup(lead_resp.text, 'html.parser')
                 
                 for a in lead_soup.find_all('a', href=True):
@@ -137,10 +140,10 @@ def gerar_diagnostico(request: Request):
                     break
                     
             if not athlete_href:
-                raise ValueError(f"Atleta '{athlete_name}' não encontrado nas URLs diretas nem na varredura.")
+                raise ValueError(f"Atleta '{athlete_name}' não encontrado nas URLs diretas nem na varredura. Verifique se ele correu mesmo na divisão {division}.")
                 
             target_url = f"https://www.rox-coach.com{athlete_href}"
-            response = requests.get(target_url, impersonate="chrome")
+            response = requests.get(target_url, impersonate="chrome", timeout=60)
             
         if "<table" not in response.text.lower():
             raise ValueError(f"A página do atleta foi encontrada, mas não carregou as tabelas de tempos.")
@@ -273,4 +276,3 @@ def gerar_diagnostico(request: Request):
     except Exception as e:
         print(f"Erro na API: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Falha ao extrair: {str(e)}")
-        # Forçando o Render a atualizar
