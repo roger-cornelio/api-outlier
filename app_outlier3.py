@@ -1,13 +1,13 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from curl_cffi import requests  # Bypass anti-robô
+from curl_cffi import requests
 import pandas as pd
 from io import StringIO
 from bs4 import BeautifulSoup
 import re
 import unicodedata
 
-app = FastAPI(title="API Outlier MVP - Hunter Mode v4.2")
+app = FastAPI(title="API Outlier MVP - Sniper Mode v6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,7 +18,6 @@ app.add_middleware(
 )
 
 def slugify(text: str) -> str:
-    # Remove acentos e caracteres especiais para formar a URL perfeita
     text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
     text = text.lower().strip()
     text = re.sub(r'[^a-z0-9\s-]', '', text)
@@ -28,9 +27,6 @@ def slugify(text: str) -> str:
 def gerar_diagnostico(request: Request):
     params = request.query_params
     
-    # ==========================================
-    # 🛡️ BLINDAGEM DE PARÂMETROS
-    # ==========================================
     hyrox_url = params.get('hyrox_url') or params.get('url') or params.get('resultado_url')
     athlete_name = params.get('athlete_name') or params.get('nome_do_atleta') or params.get('nome') or params.get('athleteName')
     event_name = params.get('event_name') or params.get('evento') or params.get('nome_do_evento') or params.get('eventName')
@@ -41,115 +37,66 @@ def gerar_diagnostico(request: Request):
 
     print(f"Iniciando busca para: {athlete_name} | Evento: {event_name}")
     try:
-        # ==========================================
-        # PARTE 1: MODO CAÇADOR (Bypass Total)
-        # ==========================================
-        
-        # 1. Extrair Season e Sexo
+        # 1. Extrair Season
         season_match = re.search(r'season-(\d+)', hyrox_url)
         season = season_match.group(1) if season_match else "8"
-        
-        sex_match = re.search(r'sex(?:%5D|\])=([MW])', hyrox_url)
-        sex_char = sex_match.group(1) if sex_match else "M"
-        sex_str = "men" if sex_char == "M" else "women"
         
         # 2. Acessar a página do Evento
         event_slug = slugify(event_name)
         race_url = f"https://www.rox-coach.com/seasons/{season}/races/{event_slug}"
         
-        # 👉 AUMENTO DE TIMEOUT PARA 60 SEGUNDOS AQUI
-        race_resp = requests.get(race_url, impersonate="chrome", timeout=60)
+        race_resp = requests.get(race_url, impersonate="chrome", timeout=30)
         
-        # PLANO B PARA O EVENTO
+        # PLANO B PARA O EVENTO: Tenta sem o ano no início
         if race_resp.status_code != 200:
             event_slug_no_year = re.sub(r'^\d{4}-', '', event_slug)
             race_url_2 = f"https://www.rox-coach.com/seasons/{season}/races/{event_slug_no_year}"
             print(f"Tentando URL de Evento alternativa: {race_url_2}")
-            race_resp = requests.get(race_url_2, impersonate="chrome", timeout=60)
+            race_resp = requests.get(race_url_2, impersonate="chrome", timeout=30)
             if race_resp.status_code == 200:
                 race_url = race_url_2
                 
         if race_resp.status_code != 200:
             raise ValueError(f"Evento não encontrado no RoxCoach. Tentamos: {race_url}")
             
-        soup = BeautifulSoup(race_resp.text, 'html.parser')
+        base_race_url = race_url 
         
-        # 3. Encontrar a URL da Divisão
-        div_norm = division.lower().replace('hyrox ', '').split()[0]
-        division_href = None
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if '/divisions/' in href and div_norm in href.lower():
-                division_href = href
+        # 3. MODO SNIPER (Brute-force inteligente de URL)
+        # O RoxCoach removeu as /divisions/ da URL e adicionou sufixos como -1, -2
+        athlete_slug = slugify(athlete_name)
+        slugs_to_try = [athlete_slug]
+        
+        nome_partes = athlete_name.split()
+        if len(nome_partes) > 2:
+            nome_curto = f"{nome_partes[0]} {nome_partes[-1]}"
+            slugs_to_try.append(slugify(nome_curto))
+
+        # Tenta a URL sem sufixo, e depois de -1 até -10
+        suffixes = [""] + [f"-{i}" for i in range(1, 11)]
+        
+        target_url = None
+        response = None
+        
+        print("Iniciando Modo Sniper (Testando sufixos)...")
+        for slug in slugs_to_try:
+            for suffix in suffixes:
+                test_url = f"{base_race_url}/results/{slug}{suffix}"
+                # Timeout super rápido de 10s: se não tiver o atleta ele ignora o 404 e pula pro próximo na hora
+                resp = requests.get(test_url, impersonate="chrome", timeout=10) 
+                
+                if resp.status_code == 200 and "<table" in resp.text.lower():
+                    print(f"✅ ATLETA ENCONTRADO! URL: {test_url}")
+                    target_url = test_url
+                    response = resp
+                    break
+            if response:
                 break
                 
-        if not division_href:
-            raise ValueError(f"Divisão '{division}' não encontrada.")
-            
-        # 4. BUSCA DO ATLETA (Varredura de Falsos Positivos)
-        athlete_slug = slugify(athlete_name)
-        base_div_url = division_href.split('/results')[0]
-        
-        target_url = f"https://www.rox-coach.com{base_div_url}/results/{athlete_slug}"
-        print(f"🎯 Tentando URL Principal: {target_url}")
-
-        # 👉 AUMENTO DE TIMEOUT PARA 60 SEGUNDOS AQUI
-        response = requests.get(target_url, impersonate="chrome", timeout=60)
-        
-        # TENTATIVA 2: Nome curto
-        if response.status_code != 200 or "<table" not in response.text.lower():
-            nome_partes = athlete_name.split()
-            if len(nome_partes) > 2:
-                nome_curto = f"{nome_partes[0]} {nome_partes[-1]}"
-                slug_curto = slugify(nome_curto)
-                target_url_2 = f"https://www.rox-coach.com{base_div_url}/results/{slug_curto}"
-                print(f"🎯 Tentando URL Curta: {target_url_2}")
-                response_2 = requests.get(target_url_2, impersonate="chrome", timeout=60)
-                if response_2.status_code == 200 and "<table" in response_2.text.lower():
-                    target_url = target_url_2
-                    response = response_2
-
-        # TENTATIVA 3: O Verdadeiro Caçador (Varredura no Leaderboard com 60s)
-        if response.status_code != 200 or "<table" not in response.text.lower():
-            print("🕵️ URLs diretas falharam ou sem tabela. Iniciando Varredura no Leaderboard...")
-            leaderboard_url = f"https://www.rox-coach.com{division_href}"
-            if "/results" not in leaderboard_url:
-                leaderboard_url += "/results"
-            leaderboard_url += f"?sex={sex_str}"
-            
-            search_parts = set(athlete_name.lower().split())
-            athlete_href = None
-            
-            # Varre as páginas de 1 a 5 (evita limite de tempo da própria plataforma Render)
-            for page in range(1, 6):
-                page_url = f"{leaderboard_url}&page={page}"
-                print(f"Lendo página {page}...")
-                # 👉 AUMENTO DE TIMEOUT PARA 60 SEGUNDOS AQUI
-                lead_resp = requests.get(page_url, impersonate="chrome", timeout=60)
-                lead_soup = BeautifulSoup(lead_resp.text, 'html.parser')
-                
-                for a in lead_soup.find_all('a', href=True):
-                    href = a['href']
-                    if '/results/' in href and '/divisions/' in href:
-                        name_parts = set(a.text.strip().lower().split())
-                        if len(search_parts.intersection(name_parts)) >= 2:
-                            athlete_href = href
-                            break
-                if athlete_href:
-                    print(f"✅ Link verdadeiro encontrado na página {page}!")
-                    break
-                    
-            if not athlete_href:
-                raise ValueError(f"Atleta '{athlete_name}' não encontrado nas URLs diretas nem na varredura. Verifique se ele correu mesmo na divisão {division}.")
-                
-            target_url = f"https://www.rox-coach.com{athlete_href}"
-            response = requests.get(target_url, impersonate="chrome", timeout=60)
-            
-        if "<table" not in response.text.lower():
-            raise ValueError(f"A página do atleta foi encontrada, mas não carregou as tabelas de tempos.")
+        if not response:
+            raise ValueError(f"Atleta '{athlete_name}' não encontrado. O RoxCoach pode ainda não ter processado este resultado ou o nome está diferente.")
 
         # ==========================================
-        # PARTE 2: A SUA LÓGICA DE EXTRAÇÃO E PARSING
+        # PARTE 2: A LÓGICA DE EXTRAÇÃO DE DADOS
         # ==========================================
         tabelas = pd.read_html(StringIO(response.text))
         soup_final = BeautifulSoup(response.text, 'html.parser')
