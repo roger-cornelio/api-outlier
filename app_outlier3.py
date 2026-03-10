@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 import re
 import unicodedata
 
-app = FastAPI(title="API Outlier MVP - Sniper Mode v6")
+app = FastAPI(title="API Outlier MVP - Sniper Mode v6.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -170,12 +170,14 @@ def gerar_diagnostico(request: Request):
             "roxzone": "N/A"
         }
         
-        match_ranks = re.search(r'(\d{2}:\d{2}:\d{2})\s+(\d+(?:st|nd|rd|th)\s+in\s+AG\s+\|\s+Top\s+[\d.]+%)\s+(\d+(?:st|nd|rd|th)\s+\|\s+Top\s+[\d.]+%)', texto_completo)
+        # 👇 CORREÇÃO BLINDADA: Aceita números (1st, 14th) ou Emojis (🥇, 🥈, 🥉)
+        match_ranks = re.search(r'(\d{2}:\d{2}:\d{2})\s+(.*?\s+in\s+AG\s+\|\s+Top\s+[\d.]+%)\s+(.*?\s+\|\s+Top\s+[\d.]+%)', texto_completo)
+        
         if match_ranks:
             if resumo["finish_time"] == "N/A":
-                resumo["finish_time"] = match_ranks.group(1)
-            resumo["posicao_categoria"] = match_ranks.group(2)
-            resumo["posicao_geral"] = match_ranks.group(3)
+                resumo["finish_time"] = match_ranks.group(1).strip()
+            resumo["posicao_categoria"] = match_ranks.group(2).strip()
+            resumo["posicao_geral"] = match_ranks.group(3).strip()
         
         textos_limpos = [t.strip() for t in soup_final.stripped_strings if t.strip()]
         for i, texto in enumerate(textos_limpos):
