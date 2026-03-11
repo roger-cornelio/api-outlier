@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 import re
 import unicodedata
 
-app = FastAPI(title="API Outlier MVP - v9.2 Super Cleaner")
+app = FastAPI(title="API Outlier MVP - v9.3 Bulletproof")
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,16 +44,12 @@ def gerar_diagnostico(request: Request):
     # 2. Corta a palavra HYROX e o que vier depois
     clean_event = re.split(r'(?i)hyrox', clean_event)[0].strip()
     
-    # 3. Pega apenas as letras puras (Ex: "2025 Sao Paulo" -> "saopaulo")
-    event_letters = re.sub(r'\d+', '', clean_event)
-    event_letters = slugify(event_letters).replace('-', '')
-    
-    if not event_letters:
-        event_letters = slugify(clean_event).replace('-', '')
+    # 3. Quebra em palavras-chave fortes (Ex: "Mexico City" -> ['mexico', 'city'])
+    event_words = [w for w in slugify(clean_event).split('-') if len(w) >= 3 and not w.isdigit()]
 
-    print(f"Buscando Atleta: {athlete_name} | Evento Raw: '{event_name_raw}' -> Destilado para: '{event_letters}'")
+    print(f"Buscando Atleta: {athlete_name} | Evento: '{clean_event}' | Palavras-chave: {event_words}")
 
-    # 🔥 SPEED BOOST: Usar Sessão para reaproveitar conexão (Evita o Timeout de 30s)
+    # 🔥 SPEED BOOST: Usar Sessão para reaproveitar conexão
     session = requests.Session(impersonate="chrome")
 
     try:
@@ -70,7 +66,9 @@ def gerar_diagnostico(request: Request):
             elif "mixed" in div_lower or "misto" in div_lower: sex_str = "mixed"
             else: sex_str = "men"
         
-        # ENCONTRAR O LINK REAL DO EVENTO
+        # ==========================================
+        # PASSO 1: ENCONTRAR O EVENTO
+        # ==========================================
         races_list_url = f"https://www.rox-coach.com/seasons/{season}/races"
         races_resp = session.get(races_list_url, timeout=15)
         
@@ -79,32 +77,52 @@ def gerar_diagnostico(request: Request):
         
         for a in soup_races.find_all('a', href=True):
             href = a['href']
-            # Match exato das letras puras com a URL do Roxcoach
-            if '/races/' in href and event_letters in href.replace('-', '').lower():
-                race_href = href
-                break
+            if '/races/' in href:
+                # Match mais inteligente: se qualquer palavra-chave do evento bater na URL do site
+                if event_words and any(w in href.lower() for w in event_words):
+                    race_href = href
+                    break
                 
         if not race_href:
-            raise ValueError(f"Evento contendo '{event_letters}' não encontrado na Temporada {season}.")
+            raise ValueError(f"Evento contendo as palavras {event_words} não encontrado na Temporada {season}.")
             
         race_url = f"https://www.rox-coach.com{race_href}"
         
-        # ENCONTRAR A DIVISÃO
+        # ==========================================
+        # PASSO 2: ENCONTRAR A DIVISÃO EXATA
+        # ==========================================
         race_resp = session.get(race_url, timeout=15)
         soup_race = BeautifulSoup(race_resp.text, 'html.parser')
 
-        div_norm = division.lower().replace('hyrox ', '').split()[0]
+        # Limpa o nome da divisão para achar a slug exata (Ex: "HYROX DOUBLES PRO" -> "doubles-pro")
+        div_norm = slugify(re.sub(r'(?i)hyrox|men|women|mixed|misto', '', division).strip())
+        if not div_norm: div_norm = "open"
+
         division_href = None
+        
+        # Tentativa 1: Match Exato (Garante que "doubles" não seja confundido com "doubles-pro")
         for a in soup_race.find_all('a', href=True):
             href = a['href']
-            if '/divisions/' in href and div_norm in href.lower():
-                division_href = href
-                break
+            if '/divisions/' in href:
+                href_div = href.split('/')[-1].split('?')[0].lower()
+                if href_div == div_norm or (div_norm == "open" and href_div in ["open", "individual"]):
+                    division_href = href
+                    break
+                    
+        # Tentativa 2: Fallback parcial se não achou exato
+        if not division_href:
+            for a in soup_race.find_all('a', href=True):
+                href = a['href']
+                if '/divisions/' in href and div_norm in href.lower():
+                    division_href = href
+                    break
                 
         if not division_href:
             raise ValueError(f"Divisão '{division}' não encontrada no evento.")
             
-        # MODO RADAR: LISTA DE CLASSIFICAÇÃO
+        # ==========================================
+        # PASSO 3: MODO RADAR OTIMIZADO
+        # ==========================================
         leaderboard_url = f"https://www.rox-coach.com{division_href}"
         if "/results" not in leaderboard_url:
             leaderboard_url += "/results"
@@ -113,9 +131,14 @@ def gerar_diagnostico(request: Request):
         search_parts = set([p for p in slugify(athlete_name).split('-') if len(p) > 2])
         athlete_href = None
         
-        for page in range(1, 15): 
+        for page in range(1, 20): 
             page_url = f"{leaderboard_url}&page={page}"
             lead_resp = session.get(page_url, timeout=10)
+            
+            # Auto-brake: Quebra o loop imediatamente se a página estiver vazia (evita Timeout)
+            if "<tbody>" not in lead_resp.text and "<table" not in lead_resp.text:
+                break
+                
             lead_soup = BeautifulSoup(lead_resp.text, 'html.parser')
             
             for a in lead_soup.find_all('a', href=True):
@@ -125,7 +148,9 @@ def gerar_diagnostico(request: Request):
                     link_parts = set([p for p in slugify(link_text).split('-') if len(p) > 2])
                     
                     intersection = search_parts.intersection(link_parts)
-                    if len(intersection) >= min(2, len(search_parts)):
+                    min_match = 2 if len(search_parts) >= 2 else 1
+                    
+                    if len(intersection) >= min_match:
                         athlete_href = href
                         break
             if athlete_href:
@@ -134,14 +159,16 @@ def gerar_diagnostico(request: Request):
         if not athlete_href:
             raise ValueError(f"Atleta '{athlete_name}' não encontrado na lista de classificação.")
 
-        # RASPAGEM FINAL DA PÁGINA DO ATLETA
+        # ==========================================
+        # PASSO 4: RASPAGEM DE DADOS DA PÁGINA FINAL
+        # ==========================================
         target_url = f"https://www.rox-coach.com{athlete_href}"
         response = session.get(target_url, timeout=15)
 
         tabelas = pd.read_html(StringIO(response.text))
         soup_final = BeautifulSoup(response.text, 'html.parser')
         
-        # 1. DIAGNÓSTICO DE MELHORIA
+        # DIAGNÓSTICO DE MELHORIA
         df_improvement = tabelas[0] if len(tabelas) > 0 else pd.DataFrame()
         lista_improvement = []
         if not df_improvement.empty:
@@ -165,7 +192,7 @@ def gerar_diagnostico(request: Request):
                     "improvement_value": improvement_value, "percentage": percentage
                 })
                 
-        # 2. TEMPOS E SPLITS
+        # TEMPOS E SPLITS
         df_splits = tabelas[1] if len(tabelas) > 1 else pd.DataFrame()
         lista_splits = []
         finish_time = "N/A"
@@ -177,7 +204,7 @@ def gerar_diagnostico(request: Request):
                 if nome_estacao.lower() == "roxzone":
                     finish_time = str(row[2]) if len(row) > 2 else str(row[1])
 
-        # 3. RESUMO DE PERFORMANCE
+        # RESUMO DE PERFORMANCE
         texto_completo = soup_final.get_text(separator=" ", strip=True)
         resumo = {
             "nome_atleta": athlete_name, "temporada": season, "evento": event_name_raw, "divisao": division,
@@ -202,7 +229,7 @@ def gerar_diagnostico(request: Request):
                 elif texto == "Avg. Workout" and resumo["avg_workout"] == "N/A": resumo["avg_workout"] = textos_limpos[i-1]
                 elif texto == "Roxzone" and resumo["roxzone"] == "N/A": resumo["roxzone"] = textos_limpos[i-1]
 
-        # 4. TEXTO DO TREINADOR IA
+        # TEXTO DO TREINADOR IA
         diagnostico_partes = []
         capturando = False
         for t in soup_final.stripped_strings:
