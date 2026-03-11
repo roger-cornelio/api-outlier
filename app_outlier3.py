@@ -250,7 +250,9 @@ def gerar_diagnostico(request: Request):
         }
         
         return dados_atleta
+        #forçarrender
 
     except Exception as e:
         print(f"Erro na API: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Falha ao extrair: {str(e)}")
+
