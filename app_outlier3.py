@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 import re
 import unicodedata
 
-app = FastAPI(title="API Outlier MVP - Sniper Mode v6.2")
+app = FastAPI(title="API Outlier MVP - Radar Mode v7")
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,9 +37,13 @@ def gerar_diagnostico(request: Request):
 
     print(f"Iniciando busca para: {athlete_name} | Evento: {event_name}")
     try:
-        # 1. Extrair Season
+        # 1. Extrair Season e Sexo
         season_match = re.search(r'season-(\d+)', hyrox_url)
         season = season_match.group(1) if season_match else "8"
+        
+        sex_match = re.search(r'sex(?:%5D|\])=([MW])', hyrox_url)
+        sex_char = sex_match.group(1) if sex_match else "M"
+        sex_str = "men" if sex_char == "M" else "women"
         
         # 2. Acessar a página do Evento
         event_slug = slugify(event_name)
@@ -60,56 +64,84 @@ def gerar_diagnostico(request: Request):
             raise ValueError(f"Evento não encontrado no RoxCoach. Tentamos: {race_url}")
             
         base_race_url = race_url 
-        
-        # ==========================================
-        # 3. MODO SNIPER COM FILTRO ANTI-FALSO POSITIVO
-        # ==========================================
-        athlete_slug = slugify(athlete_name)
-        slugs_to_try = [athlete_slug]
-        
-        nome_partes = athlete_name.split()
-        if len(nome_partes) > 2:
-            nome_curto = f"{nome_partes[0]} {nome_partes[-1]}"
-            slugs_to_try.append(slugify(nome_curto))
+        soup_race = BeautifulSoup(race_resp.text, 'html.parser')
 
-        # Variáveis de validação rígida (O que o robô vai procurar dentro do HTML)
-        event_parts = event_slug.split('-')
-        if len(event_parts[0]) <= 3 and len(event_parts) > 1:
-            event_keyword = event_parts[0] + event_parts[1] # ex: saopaulo
-        else:
-            event_keyword = event_parts[0] # ex: mexico, miami, fortaleza
-            
-        div_norm = division.lower().replace('hyrox ', '').split()[0] # ex: pro, doubles
-
-        # Tenta a URL sem sufixo, e depois de -1 até -10
-        suffixes = [""] + [f"-{i}" for i in range(1, 11)]
-        
+        # Extrair a URL exata da Divisão para o Modo Radar
+        div_norm = division.lower().replace('hyrox ', '').split()[0]
+        division_href = None
+        for a in soup_race.find_all('a', href=True):
+            href = a['href']
+            if '/divisions/' in href and div_norm in href.lower():
+                division_href = href
+                break
+                
+        # ==========================================
+        # 3. MODO HÍBRIDO (Tiro Rápido + Radar de Lista)
+        # ==========================================
         target_url = None
         response = None
         
-        print("Iniciando Modo Sniper (Testando sufixos)...")
-        for slug in slugs_to_try:
-            for suffix in suffixes:
-                test_url = f"{base_race_url}/results/{slug}{suffix}"
-                resp = requests.get(test_url, impersonate="chrome", timeout=10) 
+        # Palavras-chave para filtro de Falso Positivo (Pega o nome principal da cidade)
+        words = [w for w in event_slug.split('-') if not w.isdigit()]
+        event_keyword = words[0] if words else event_slug.replace('-', '')
+
+        # TENTATIVA 1: Tiro Rápido (URL Direta Padrão)
+        athlete_slug = slugify(athlete_name)
+        test_url_direct = f"{base_race_url}/results/{athlete_slug}"
+        resp_direct = requests.get(test_url_direct, impersonate="chrome", timeout=10)
+        
+        if resp_direct.status_code == 200 and "<table" in resp_direct.text.lower():
+            page_text_norm = unicodedata.normalize('NFKD', resp_direct.text.lower()).encode('ascii', 'ignore').decode('utf-8')
+            page_text_clean = re.sub(r'[^a-z0-9]', '', page_text_norm)
+            
+            # Se for realmente a prova correta (Não é Falso Positivo)
+            if event_keyword in page_text_clean and div_norm in page_text_norm:
+                target_url = test_url_direct
+                response = resp_direct
+                print("✅ [Tiro Rápido] Atleta encontrado instantaneamente!")
+
+        # TENTATIVA 2: MODO RADAR (A Sua Lógica: Ler a Lista e Pegar a URL real)
+        if not response and division_href:
+            print("📡 [Radar Mode] Iniciando leitura da lista de classificação para encontrar a variação exata do nome...")
+            
+            leaderboard_url = f"https://www.rox-coach.com{division_href}"
+            if "/results" not in leaderboard_url:
+                leaderboard_url += "/results"
+            leaderboard_url += f"?sex={sex_str}"
+            
+            # Quebra o nome buscado em palavras chaves (ignora conectivos curtos)
+            search_parts = set([p for p in slugify(athlete_name).split('-') if len(p) > 2])
+            athlete_href = None
+            
+            # Varre até 10 páginas da lista (cada página é muito rápida)
+            for page in range(1, 11):
+                page_url = f"{leaderboard_url}&page={page}"
+                print(f"Lendo página {page} da lista...")
+                lead_resp = requests.get(page_url, impersonate="chrome", timeout=15)
+                lead_soup = BeautifulSoup(lead_resp.text, 'html.parser')
                 
-                if resp.status_code == 200 and "<table" in resp.text.lower():
-                    # 🛡️ VERIFICAÇÃO DE AUTENTICIDADE DA PÁGINA (Evita pegar SP no lugar do Mexico)
-                    page_text_norm = unicodedata.normalize('NFKD', resp.text.lower()).encode('ascii', 'ignore').decode('utf-8')
-                    page_text_clean = re.sub(r'[^a-z0-9]', '', page_text_norm)
+                # Procura todos os links na lista de resultados
+                for a in lead_soup.find_all('a', href=True):
+                    href = a['href']
+                    if '/results/' in href and '/divisions/' not in href:
+                        link_text = a.get_text(strip=True)
+                        link_parts = set([p for p in slugify(link_text).split('-') if len(p) > 2])
+                        
+                        # Se pelo menos 2 partes do nome baterem (Ex: "caio" e "assayag"), achamos o nosso alvo!
+                        intersection = search_parts.intersection(link_parts)
+                        if len(intersection) >= min(2, len(search_parts)):
+                            athlete_href = href
+                            print(f"🎯 ALVO TRAVADO NA LISTA: '{link_text}' -> URL Oficial: {href}")
+                            break
+                if athlete_href:
+                    break
                     
-                    if event_keyword in page_text_clean and div_norm in page_text_norm:
-                        print(f"✅ ATLETA E EVENTO VALIDADOS COM SUCESSO! URL: {test_url}")
-                        target_url = test_url
-                        response = resp
-                        break
-                    else:
-                        print(f"⚠️ Falso positivo ignorado: O slug '{slug}{suffix}' retornou dados, mas são de outra prova.")
-            if response:
-                break
+            if athlete_href:
+                target_url = f"https://www.rox-coach.com{athlete_href}"
+                response = requests.get(target_url, impersonate="chrome", timeout=30)
                 
-        if not response:
-            raise ValueError(f"Atleta '{athlete_name}' não encontrado para o evento {event_name}. O RoxCoach pode ainda não ter processado este resultado.")
+        if not response or "<table" not in response.text.lower():
+            raise ValueError(f"Atleta '{athlete_name}' não encontrado na lista de resultados da divisão {division} no evento {event_name}.")
 
         # ==========================================
         # PARTE 2: A LÓGICA DE EXTRAÇÃO DE DADOS
