@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 import re
 import unicodedata
 
-app = FastAPI(title="API Outlier MVP - v9.3 Bulletproof")
+app = FastAPI(title="API Outlier MVP - v9.4 Extended Timeout")
 
 app.add_middleware(
     CORSMiddleware,
@@ -70,7 +70,8 @@ def gerar_diagnostico(request: Request):
         # PASSO 1: ENCONTRAR O EVENTO
         # ==========================================
         races_list_url = f"https://www.rox-coach.com/seasons/{season}/races"
-        races_resp = session.get(races_list_url, timeout=15)
+        # Aumentado para 30 segundos
+        races_resp = session.get(races_list_url, timeout=30)
         
         soup_races = BeautifulSoup(races_resp.text, 'html.parser')
         race_href = None
@@ -91,7 +92,8 @@ def gerar_diagnostico(request: Request):
         # ==========================================
         # PASSO 2: ENCONTRAR A DIVISÃO EXATA
         # ==========================================
-        race_resp = session.get(race_url, timeout=15)
+        # Aumentado para 30 segundos
+        race_resp = session.get(race_url, timeout=30)
         soup_race = BeautifulSoup(race_resp.text, 'html.parser')
 
         # Limpa o nome da divisão para achar a slug exata (Ex: "HYROX DOUBLES PRO" -> "doubles-pro")
@@ -133,7 +135,8 @@ def gerar_diagnostico(request: Request):
         
         for page in range(1, 20): 
             page_url = f"{leaderboard_url}&page={page}"
-            lead_resp = session.get(page_url, timeout=10)
+            # Aumentado para 25 segundos por página
+            lead_resp = session.get(page_url, timeout=25)
             
             # Auto-brake: Quebra o loop imediatamente se a página estiver vazia (evita Timeout)
             if "<tbody>" not in lead_resp.text and "<table" not in lead_resp.text:
@@ -163,7 +166,8 @@ def gerar_diagnostico(request: Request):
         # PASSO 4: RASPAGEM DE DADOS DA PÁGINA FINAL
         # ==========================================
         target_url = f"https://www.rox-coach.com{athlete_href}"
-        response = session.get(target_url, timeout=15)
+        # Aumentado para 30 segundos
+        response = session.get(target_url, timeout=30)
 
         tabelas = pd.read_html(StringIO(response.text))
         soup_final = BeautifulSoup(response.text, 'html.parser')
