@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 import re
 import unicodedata
 
-app = FastAPI(title="API Outlier MVP - Full Crawler v9")
+app = FastAPI(title="API Outlier MVP - Full Crawler v9.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,13 +37,22 @@ def gerar_diagnostico(request: Request):
 
     print(f"Iniciando busca profunda para: {athlete_name} | Evento: {event_name}")
     try:
-        # 1. Extrair Season e Sexo
+        # 1. Extrair Season e Sexo com Inteligência
         season_match = re.search(r'season-(\d+)', hyrox_url)
         season = season_match.group(1) if season_match else "8"
         
         sex_match = re.search(r'sex(?:%5D|\])=([MW])', hyrox_url)
-        sex_char = sex_match.group(1) if sex_match else "M"
-        sex_str = "men" if sex_char == "M" else "women"
+        if sex_match:
+            sex_str = "men" if sex_match.group(1) == "M" else "women"
+        else:
+            # Fallback blindado: lê a divisão que o Lovable mandou
+            div_lower = division.lower()
+            if "women" in div_lower or "fem" in div_lower:
+                sex_str = "women"
+            elif "mixed" in div_lower or "misto" in div_lower:
+                sex_str = "mixed"
+            else:
+                sex_str = "men"
         
         # 2. ENCONTRAR O LINK REAL DO EVENTO (Evita o problema do "2025-sao-paulo")
         event_slug_base = slugify(event_name)
@@ -120,7 +129,7 @@ def gerar_diagnostico(request: Request):
         tabelas = pd.read_html(StringIO(response.text))
         soup_final = BeautifulSoup(response.text, 'html.parser')
         
-        # [CÓDIGO DE EXTRAÇÃO DOS DADOS MANTIDO EXATAMENTE IGUAL]
+        # 1. DIAGNÓSTICO DE MELHORIA
         df_improvement = tabelas[0] if len(tabelas) > 0 else pd.DataFrame()
         lista_improvement = []
         if not df_improvement.empty:
@@ -144,6 +153,7 @@ def gerar_diagnostico(request: Request):
                     "improvement_value": improvement_value, "percentage": percentage
                 })
                 
+        # 2. TEMPOS E SPLITS
         df_splits = tabelas[1] if len(tabelas) > 1 else pd.DataFrame()
         lista_splits = []
         finish_time = "N/A"
@@ -155,6 +165,7 @@ def gerar_diagnostico(request: Request):
                 if nome_estacao.lower() == "roxzone":
                     finish_time = str(row[2]) if len(row) > 2 else str(row[1])
 
+        # 3. RESUMO DE PERFORMANCE
         texto_completo = soup_final.get_text(separator=" ", strip=True)
         resumo = {
             "nome_atleta": athlete_name, "temporada": season, "evento": event_name, "divisao": division,
@@ -163,6 +174,7 @@ def gerar_diagnostico(request: Request):
             "avg_workout": "N/A", "roxzone": "N/A"
         }
         
+        # Correção Blindada para pegar Medalhas Emojis (🥇🥈🥉) e Posições (1st, 14th)
         match_ranks = re.search(r'(\d{2}:\d{2}:\d{2})\s+(.*?\s+in\s+AG\s+\|\s+Top\s+[\d.]+%)\s+(.*?\s+\|\s+Top\s+[\d.]+%)', texto_completo)
         if match_ranks:
             resumo["finish_time"] = match_ranks.group(1).strip() if resumo["finish_time"] == "N/A" else resumo["finish_time"]
@@ -179,6 +191,7 @@ def gerar_diagnostico(request: Request):
                 elif texto == "Avg. Workout" and resumo["avg_workout"] == "N/A": resumo["avg_workout"] = textos_limpos[i-1]
                 elif texto == "Roxzone" and resumo["roxzone"] == "N/A": resumo["roxzone"] = textos_limpos[i-1]
 
+        # 4. TEXTO DO TREINADOR IA
         diagnostico_partes = []
         capturando = False
         for t in soup_final.stripped_strings:
