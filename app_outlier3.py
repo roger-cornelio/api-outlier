@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 import re
 import unicodedata
 
-app = FastAPI(title="API Outlier MVP - Full Crawler v9.1")
+app = FastAPI(title="API Outlier MVP - v9.2 Super Cleaner")
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,6 +18,7 @@ app.add_middleware(
 )
 
 def slugify(text: str) -> str:
+    if not text: return ""
     text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
     text = text.lower().strip()
     text = re.sub(r'[^a-z0-9\s-]', '', text)
@@ -29,15 +30,34 @@ def gerar_diagnostico(request: Request):
     
     hyrox_url = params.get('hyrox_url') or params.get('url') or params.get('resultado_url')
     athlete_name = params.get('athlete_name') or params.get('nome_do_atleta') or params.get('nome') or params.get('athleteName')
-    event_name = params.get('event_name') or params.get('evento') or params.get('nome_do_evento') or params.get('eventName')
+    event_name_raw = params.get('event_name') or params.get('evento') or params.get('nome_do_evento') or params.get('eventName')
     division = params.get('division') or params.get('divisao')
     
-    if not all([hyrox_url, athlete_name, event_name, division]):
+    if not all([hyrox_url, athlete_name, event_name_raw, division]):
         raise HTTPException(status_code=400, detail=f"Faltam parâmetros! Recebidos: {dict(params)}")
 
-    print(f"Iniciando busca profunda para: {athlete_name} | Evento: {event_name}")
+    # ==========================================
+    # 🧹 SUPER CLEANER (Lidando com a sujeira do Lovable)
+    # ==========================================
+    # 1. Corta no bullet point (•) ou pipe (|)
+    clean_event = re.split(r'[•|]', event_name_raw)[0].strip()
+    # 2. Corta a palavra HYROX e o que vier depois
+    clean_event = re.split(r'(?i)hyrox', clean_event)[0].strip()
+    
+    # 3. Pega apenas as letras puras (Ex: "2025 Sao Paulo" -> "saopaulo")
+    event_letters = re.sub(r'\d+', '', clean_event)
+    event_letters = slugify(event_letters).replace('-', '')
+    
+    if not event_letters:
+        event_letters = slugify(clean_event).replace('-', '')
+
+    print(f"Buscando Atleta: {athlete_name} | Evento Raw: '{event_name_raw}' -> Destilado para: '{event_letters}'")
+
+    # 🔥 SPEED BOOST: Usar Sessão para reaproveitar conexão (Evita o Timeout de 30s)
+    session = requests.Session(impersonate="chrome")
+
     try:
-        # 1. Extrair Season e Sexo com Inteligência
+        # Extrair Season e Sexo
         season_match = re.search(r'season-(\d+)', hyrox_url)
         season = season_match.group(1) if season_match else "8"
         
@@ -45,38 +65,32 @@ def gerar_diagnostico(request: Request):
         if sex_match:
             sex_str = "men" if sex_match.group(1) == "M" else "women"
         else:
-            # Fallback blindado: lê a divisão que o Lovable mandou
             div_lower = division.lower()
-            if "women" in div_lower or "fem" in div_lower:
-                sex_str = "women"
-            elif "mixed" in div_lower or "misto" in div_lower:
-                sex_str = "mixed"
-            else:
-                sex_str = "men"
+            if "women" in div_lower or "fem" in div_lower: sex_str = "women"
+            elif "mixed" in div_lower or "misto" in div_lower: sex_str = "mixed"
+            else: sex_str = "men"
         
-        # 2. ENCONTRAR O LINK REAL DO EVENTO (Evita o problema do "2025-sao-paulo")
-        event_slug_base = slugify(event_name)
+        # ENCONTRAR O LINK REAL DO EVENTO
         races_list_url = f"https://www.rox-coach.com/seasons/{season}/races"
-        races_resp = requests.get(races_list_url, impersonate="chrome", timeout=30)
+        races_resp = session.get(races_list_url, timeout=15)
         
         soup_races = BeautifulSoup(races_resp.text, 'html.parser')
         race_href = None
         
         for a in soup_races.find_all('a', href=True):
             href = a['href']
-            # Se for um link de race e contiver o nome da cidade base (ex: saopaulo)
-            if '/races/' in href and event_slug_base.replace('-', '') in href.replace('-', '').lower():
+            # Match exato das letras puras com a URL do Roxcoach
+            if '/races/' in href and event_letters in href.replace('-', '').lower():
                 race_href = href
                 break
                 
         if not race_href:
-            raise ValueError(f"Evento '{event_name}' não encontrado na lista oficial da Temporada {season} no RoxCoach.")
+            raise ValueError(f"Evento contendo '{event_letters}' não encontrado na Temporada {season}.")
             
         race_url = f"https://www.rox-coach.com{race_href}"
-        print(f"📍 URL real do Evento encontrada: {race_url}")
         
-        # 3. ENCONTRAR A DIVISÃO
-        race_resp = requests.get(race_url, impersonate="chrome", timeout=30)
+        # ENCONTRAR A DIVISÃO
+        race_resp = session.get(race_url, timeout=15)
         soup_race = BeautifulSoup(race_resp.text, 'html.parser')
 
         div_norm = division.lower().replace('hyrox ', '').split()[0]
@@ -88,10 +102,9 @@ def gerar_diagnostico(request: Request):
                 break
                 
         if not division_href:
-            raise ValueError(f"Divisão '{division}' não encontrada na página do evento {event_name}.")
+            raise ValueError(f"Divisão '{division}' não encontrada no evento.")
             
-        # 4. MODO RADAR: ENCONTRAR A URL REAL DO ATLETA (Variações de Nome/Sufixo)
-        print("📡 Iniciando leitura da lista de classificação...")
+        # MODO RADAR: LISTA DE CLASSIFICAÇÃO
         leaderboard_url = f"https://www.rox-coach.com{division_href}"
         if "/results" not in leaderboard_url:
             leaderboard_url += "/results"
@@ -100,9 +113,9 @@ def gerar_diagnostico(request: Request):
         search_parts = set([p for p in slugify(athlete_name).split('-') if len(p) > 2])
         athlete_href = None
         
-        for page in range(1, 15): # Limite seguro para encontrar qualquer atleta
+        for page in range(1, 15): 
             page_url = f"{leaderboard_url}&page={page}"
-            lead_resp = requests.get(page_url, impersonate="chrome", timeout=15)
+            lead_resp = session.get(page_url, timeout=10)
             lead_soup = BeautifulSoup(lead_resp.text, 'html.parser')
             
             for a in lead_soup.find_all('a', href=True):
@@ -114,17 +127,16 @@ def gerar_diagnostico(request: Request):
                     intersection = search_parts.intersection(link_parts)
                     if len(intersection) >= min(2, len(search_parts)):
                         athlete_href = href
-                        print(f"🎯 ALVO TRAVADO: '{link_text}' -> Link Oficial: {href}")
                         break
             if athlete_href:
                 break
                 
         if not athlete_href:
-            raise ValueError(f"Atleta '{athlete_name}' não encontrado na lista de resultados da divisão {division}.")
+            raise ValueError(f"Atleta '{athlete_name}' não encontrado na lista de classificação.")
 
-        # 5. RASPAGEM FINAL
+        # RASPAGEM FINAL DA PÁGINA DO ATLETA
         target_url = f"https://www.rox-coach.com{athlete_href}"
-        response = requests.get(target_url, impersonate="chrome", timeout=30)
+        response = session.get(target_url, timeout=15)
 
         tabelas = pd.read_html(StringIO(response.text))
         soup_final = BeautifulSoup(response.text, 'html.parser')
@@ -168,13 +180,12 @@ def gerar_diagnostico(request: Request):
         # 3. RESUMO DE PERFORMANCE
         texto_completo = soup_final.get_text(separator=" ", strip=True)
         resumo = {
-            "nome_atleta": athlete_name, "temporada": season, "evento": event_name, "divisao": division,
+            "nome_atleta": athlete_name, "temporada": season, "evento": event_name_raw, "divisao": division,
             "finish_time": finish_time, "posicao_categoria": "N/A", "posicao_geral": "N/A",
             "run_total": "N/A", "avg_lap": "N/A", "best_lap": "N/A", "workout_total": "N/A",
             "avg_workout": "N/A", "roxzone": "N/A"
         }
         
-        # Correção Blindada para pegar Medalhas Emojis (🥇🥈🥉) e Posições (1st, 14th)
         match_ranks = re.search(r'(\d{2}:\d{2}:\d{2})\s+(.*?\s+in\s+AG\s+\|\s+Top\s+[\d.]+%)\s+(.*?\s+\|\s+Top\s+[\d.]+%)', texto_completo)
         if match_ranks:
             resumo["finish_time"] = match_ranks.group(1).strip() if resumo["finish_time"] == "N/A" else resumo["finish_time"]
