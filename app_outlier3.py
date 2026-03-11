@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 import re
 import unicodedata
 
-app = FastAPI(title="API Outlier MVP - Sniper Mode v6.1")
+app = FastAPI(title="API Outlier MVP - Sniper Mode v6.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -61,8 +61,9 @@ def gerar_diagnostico(request: Request):
             
         base_race_url = race_url 
         
-        # 3. MODO SNIPER (Brute-force inteligente de URL)
-        # O RoxCoach removeu as /divisions/ da URL e adicionou sufixos como -1, -2
+        # ==========================================
+        # 3. MODO SNIPER COM FILTRO ANTI-FALSO POSITIVO
+        # ==========================================
         athlete_slug = slugify(athlete_name)
         slugs_to_try = [athlete_slug]
         
@@ -70,6 +71,15 @@ def gerar_diagnostico(request: Request):
         if len(nome_partes) > 2:
             nome_curto = f"{nome_partes[0]} {nome_partes[-1]}"
             slugs_to_try.append(slugify(nome_curto))
+
+        # Variáveis de validação rígida (O que o robô vai procurar dentro do HTML)
+        event_parts = event_slug.split('-')
+        if len(event_parts[0]) <= 3 and len(event_parts) > 1:
+            event_keyword = event_parts[0] + event_parts[1] # ex: saopaulo
+        else:
+            event_keyword = event_parts[0] # ex: mexico, miami, fortaleza
+            
+        div_norm = division.lower().replace('hyrox ', '').split()[0] # ex: pro, doubles
 
         # Tenta a URL sem sufixo, e depois de -1 até -10
         suffixes = [""] + [f"-{i}" for i in range(1, 11)]
@@ -81,19 +91,25 @@ def gerar_diagnostico(request: Request):
         for slug in slugs_to_try:
             for suffix in suffixes:
                 test_url = f"{base_race_url}/results/{slug}{suffix}"
-                # Timeout super rápido de 10s: se não tiver o atleta ele ignora o 404 e pula pro próximo na hora
                 resp = requests.get(test_url, impersonate="chrome", timeout=10) 
                 
                 if resp.status_code == 200 and "<table" in resp.text.lower():
-                    print(f"✅ ATLETA ENCONTRADO! URL: {test_url}")
-                    target_url = test_url
-                    response = resp
-                    break
+                    # 🛡️ VERIFICAÇÃO DE AUTENTICIDADE DA PÁGINA (Evita pegar SP no lugar do Mexico)
+                    page_text_norm = unicodedata.normalize('NFKD', resp.text.lower()).encode('ascii', 'ignore').decode('utf-8')
+                    page_text_clean = re.sub(r'[^a-z0-9]', '', page_text_norm)
+                    
+                    if event_keyword in page_text_clean and div_norm in page_text_norm:
+                        print(f"✅ ATLETA E EVENTO VALIDADOS COM SUCESSO! URL: {test_url}")
+                        target_url = test_url
+                        response = resp
+                        break
+                    else:
+                        print(f"⚠️ Falso positivo ignorado: O slug '{slug}{suffix}' retornou dados, mas são de outra prova.")
             if response:
                 break
                 
         if not response:
-            raise ValueError(f"Atleta '{athlete_name}' não encontrado. O RoxCoach pode ainda não ter processado este resultado ou o nome está diferente.")
+            raise ValueError(f"Atleta '{athlete_name}' não encontrado para o evento {event_name}. O RoxCoach pode ainda não ter processado este resultado.")
 
         # ==========================================
         # PARTE 2: A LÓGICA DE EXTRAÇÃO DE DADOS
@@ -170,7 +186,7 @@ def gerar_diagnostico(request: Request):
             "roxzone": "N/A"
         }
         
-        # 👇 CORREÇÃO BLINDADA: Aceita números (1st, 14th) ou Emojis (🥇, 🥈, 🥉)
+        # CORREÇÃO BLINDADA: Aceita números (1st, 14th) ou Emojis (🥇, 🥈, 🥉)
         match_ranks = re.search(r'(\d{2}:\d{2}:\d{2})\s+(.*?\s+in\s+AG\s+\|\s+Top\s+[\d.]+%)\s+(.*?\s+\|\s+Top\s+[\d.]+%)', texto_completo)
         
         if match_ranks:
