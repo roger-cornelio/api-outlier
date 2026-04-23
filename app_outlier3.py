@@ -1,82 +1,97 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Query, HTTPException
+from typing import Dict, Any, List
 import httpx
+import os
+import uvicorn
 
-app = FastAPI()
+app = FastAPI(title="Diagnostico Auto RoxCoach")
 
-@app.get("/healthcheck")
-async def healthcheck():
-    return {"status": "ok"}
+ROXCOACH_BASE_URL = os.getenv("ROXCOACH_BASE_URL", "https://app.roxcoach.com.br/api")
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://roxcoach.com.br/",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-site",
+}
+
+async def fetch_json(client: httpx.AsyncClient, url: str, params: Dict[str, Any] | None = None) -> Dict[str, Any] | List[Dict[str, Any]]:
+    response = await client.get(url, params=params)
+    if response.status_code != 200:
+        raise HTTPException(status_code=response.status_code, detail=f"Erro na API RoxCoach: {response.text[:200]}")
+    return response.json()
 
 @app.get("/diagnostico_auto")
-async def diagnostico_auto():
-    base_url = "https://api.roxcoach.com"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    max_pages = 5
-    async with httpx.AsyncClient() as client:
-        # Resolve race_id via pagination
-        race_id = None
-        page = 1
-        while race_id is None and page <= max_pages:
-            resp = await client.get(
-                f"{base_url}/races",
-                params={"page": page, "limit": 10},
-                headers=headers
-            )
-            if resp.status_code != 200:
-                return {"error": "Failed to fetch races"}
-            data = resp.json()
-            races = data.get("races", data.get("data", []))
-            if races:
-                race_id = races[0]["id"]
-            page += 1
-        if race_id is None:
-            return {"error": "No race found"}
+async def diagnostico_auto(
+    nome: str = Query(..., description="Nome do atleta"),
+    evento: str = Query(..., description="Nome ou termo de busca do evento"),
+    divisao: str = Query(..., description="Nome ou termo da divisão"),
+):
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(60.0),
+        headers=HEADERS,
+        limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+    ) as client:
+        # 2. Resolve race_id via API RoxCoach
+        races_url = f"{ROXCOACH_BASE_URL}/races/search"
+        params = {"q": evento}
+        races_data = await fetch_json(client, races_url, params)
+        races = races_data if isinstance(races_data, list) else races_data.get("races", races_data.get("data", []))
+        if not races:
+            raise HTTPException(404, "Evento não encontrado")
+        race_id = races[0]["id"]
 
-        # Resolve division_id via pagination
+        # 3. Resolve division_id
+        divs_url = f"{ROXCOACH_BASE_URL}/races/{race_id}/divisions"
+        divs_data = await fetch_json(client, divs_url)
+        divs = divs_data if isinstance(divs_data, list) else divs_data.get("divisions", divs_data.get("data", []))
         division_id = None
-        page = 1
-        while division_id is None and page <= max_pages:
-            resp = await client.get(
-                f"{base_url}/races/{race_id}/divisions",
-                params={"page": page, "limit": 10},
-                headers=headers
-            )
-            if resp.status_code != 200:
-                return {"error": "Failed to fetch divisions"}
-            data = resp.json()
-            divisions = data.get("divisions", data.get("data", []))
-            if divisions:
-                division_id = divisions[0]["id"]
-            page += 1
-        if division_id is None:
-            return {"error": "No division found"}
+        divisao_lower = divisao.lower()
+        for div in divs:
+            if divisao_lower in div.get("name", "").lower():
+                division_id = div["id"]
+                break
+        if not division_id:
+            raise HTTPException(404, "Divisão não encontrada")
 
-        # Resolve athlete_id via pagination
+        # 4. Resolve athlete_id via paginação
         athlete_id = None
         page = 1
-        while athlete_id is None and page <= max_pages:
-            resp = await client.get(
-                f"{base_url}/divisions/{division_id}/athletes",
-                params={"page": page, "limit": 10},
-                headers=headers
-            )
-            if resp.status_code != 200:
-                return {"error": "Failed to fetch athletes"}
-            data = resp.json()
-            athletes = data.get("athletes", data.get("data", []))
-            if athletes:
-                athlete_id = athletes[0]["id"]
+        limit = 100
+        max_pages = 20
+        nome_lower = nome.lower()
+        while page <= max_pages:
+            athletes_url = f"{ROXCOACH_BASE_URL}/races/{race_id}/divisions/{division_id}/athletes"
+            params = {"page": page, "limit": limit}
+            athletes_data = await fetch_json(client, athletes_url, params)
+            athletes = athletes_data if isinstance(athletes_data, list) else athletes_data.get("athletes", athletes_data.get("data", []))
+            for athlete in athletes:
+                if nome_lower in athlete.get("name", "").lower():
+                    athlete_id = athlete["id"]
+                    break
+            if athlete_id:
+                break
+            if len(athletes) < limit:
+                break
             page += 1
-        if athlete_id is None:
-            return {"error": "No athlete found"}
+        if not athlete_id:
+            raise HTTPException(404, "Atleta não encontrado")
 
-        # Call final endpoint
-        final_resp = await client.get(
-            f"{base_url}/diagnostico_auto/{race_id}/{division_id}/{athlete_id}",
-            headers=headers
-        )
-        if final_resp.status_code != 200:
-            return {"error": f"Final endpoint failed: {final_resp.status_code}"}
-        return final_resp.json()
+        # 5. Chama endpoint final de resultados
+        results_url = f"{ROXCOACH_BASE_URL}/races/{race_id}/divisions/{division_id}/athletes/{athlete_id}/results"
+        results_data = await fetch_json(client, results_url)
+
+        # 6. Retorna performanceTable bruta
+        performance_table = results_data.get("performanceTable")
+        if performance_table is None:
+            raise HTTPException(404, "performanceTable não encontrada nos resultados")
+
+        return performance_table
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
